@@ -169,7 +169,7 @@ CREATE TABLE my_extensions.biomarker_definitions (
 Extract lab values and biomarkers stored in custom tables:
 
 ```r
-covariateSettings <- createExtensionCovariateSettings(
+covariateSettingsEXT <- createExtensionCovariateSettings(
   analysisId = 950,
   extensionDatabaseSchema = "lab_extensions",
   extensionTableName = "lab_results",
@@ -197,7 +197,7 @@ plpData <- getPlpData(
   cohortDatabaseSchema = "results",
   cohortTable = "cohort",
   cohortId = 1,
-  covariateSettings = extSettings,
+  covariateSettings = covariateSettingsEXT, # Note that this only uses the extension covariates and nothing else!
   outcomeDatabaseSchema = "results",
   outcomeTable = "cohort",
   outcomeIds = 2
@@ -215,7 +215,7 @@ covariateData <- getDbCovariateData(
   cohortDatabaseSchema = "results",
   cohortTable = "cohort",
   cohortIds = c(1, 2),
-  covariateSettings = extSettings
+  covariateSettings = covariateSettingsEXT
 )
 ```
 
