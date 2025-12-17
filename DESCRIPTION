@@ -1,0 +1,42 @@
+Package: FeatureExtractionForExtensions
+Type: Package
+Title: Building Covariates from Extension Tables
+Version: 0.1.0
+Date: 2025-12-16
+Authors@R: c(
+  person("Jared", "Houghtaling", , "houghtaling@ohdsi.org", role = c("aut")),
+  person("Martijn", "Scheumie", , "scheumie@ohdsi.org", role = c("aut"))
+  )
+Maintainer: Jared Houghtaling <houghtaling@ohdsi.org>
+Description: An R package for creating covariate objects for analytics pipelines
+    that reference extension tables in OMOP CDM databases. This package extends the
+    FeatureExtraction framework to support custom extension tables that are not part
+    of the standard CDM schema. The intent of the package is to support working groups
+    and use cases that rely on data elements that do not align with the standardized
+    data model and require custom data structures that extend OMOP.
+Depends:
+  R (>= 3.2.2),
+  DatabaseConnector (>= 3.0.0),
+  FeatureExtraction (>= 3.0.0)
+Imports:
+  methods,
+  dplyr,
+  SqlRender (>= 1.18.0),
+  ParallelLogger (>= 2.0.2),
+  Andromeda (>= 1.0.0),
+  checkmate,
+  rlang,
+  DBI
+Suggests:
+  testthat,
+  knitr,
+  rmarkdown,
+  Eunomia (>= 2.0.0)
+License: Apache License 2.0
+VignetteBuilder: knitr
+URL: https://github.com/OHDSI/FeatureExtractionForExtensions
+BugReports: https://github.com/OHDSI/FeatureExtractionForExtensions/issues
+NeedsCompilation: no
+RoxygenNote: 7.3.2
+Encoding: UTF-8
+Language: en-US

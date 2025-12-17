@@ -1,0 +1,11 @@
+^.*\.Rproj$
+^\.Rproj\.user$
+^\.gitignore$
+^\.git$
+^\.github$
+^README\.Rmd$
+^LICENSE\.md$
+^doc$
+^Meta$
+^\.vscode$
+^\.idea$

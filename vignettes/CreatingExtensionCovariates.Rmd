@@ -1,0 +1,373 @@
+---
+title: "Creating Covariates from Extension Tables"
+author: "FeatureExtractionForExtensions"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Creating Covariates from Extension Tables}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+## Introduction
+
+This vignette demonstrates how to use the **FeatureExtractionForExtensions** package to create covariates from custom extension tables in OMOP CDM databases. Extension tables are custom tables that extend the standard CDM schema with additional data elements not part of the core specification.
+
+This package implements the custom covariate builder pattern described in the [FeatureExtraction documentation](https://ohdsi.github.io/FeatureExtraction/articles/CreatingCustomCovariateBuilders.html).
+
+## Prerequisites
+
+```{r, eval=FALSE}
+library(FeatureExtractionForExtensions)
+library(FeatureExtraction)
+library(DatabaseConnector)
+```
+
+## Overview of Custom Covariate Builders
+
+To create custom covariate builders, two things are needed:
+
+1. **A covariate settings function** - Creates a `covariateSettings` object
+2. **A covariate construction function** - Uses the settings to construct covariates
+
+The FeatureExtractionForExtensions package provides these functions:
+
+- `createExtensionCovariateSettings()` - The settings function
+- `getDbExtensionCovariateData()` - The construction function
+
+## Example 1: Basic Extension Table Covariates
+
+### Scenario
+
+Suppose you have a custom table storing patient biomarker data:
+
+```sql
+CREATE TABLE my_extensions.patient_biomarkers (
+  person_id BIGINT NOT NULL,
+  biomarker_id INT NOT NULL,
+  biomarker_value FLOAT,
+  measurement_date DATE
+);
+
+CREATE TABLE my_extensions.biomarker_definitions (
+  biomarker_id INT PRIMARY KEY,
+  biomarker_name VARCHAR(255)
+);
+```
+
+### Creating Covariate Settings
+
+```{r, eval=FALSE}
+# Define connection details
+connectionDetails <- DatabaseConnector::createConnectionDetails(
+  dbms = "postgresql",
+  server = "localhost/ohdsi",
+  user = "your_username",
+  password = "your_password"
+)
+
+# Create covariate settings for the extension table
+biomarkerSettings <- createExtensionCovariateSettings(
+  analysisId = 998,
+  extensionDatabaseSchema = "my_extensions",
+  extensionTableName = "patient_biomarkers",
+  extensionFields = c("biomarker_id", "biomarker_value"),
+  joinField = "person_id",
+  covariateIdField = "biomarker_id",
+  covariateValueField = "biomarker_value",
+  covariateRefTable = "biomarker_definitions",
+  covariateNameField = "biomarker_name",
+  isBinary = FALSE,
+  missingMeansZero = FALSE
+)
+```
+
+### Extracting Covariates
+
+```{r, eval=FALSE}
+connection <- DatabaseConnector::connect(connectionDetails)
+
+# Extract covariates for a specific cohort
+covariateData <- getDbExtensionCovariateData(
+  connection = connection,
+  cdmDatabaseSchema = "cdm",
+  cohortTable = "#cohort",
+  cohortIds = 1,
+  rowIdField = "subject_id",
+  covariateSettings = biomarkerSettings,
+  aggregated = FALSE
+)
+
+# View summary
+summary(covariateData)
+
+DatabaseConnector::disconnect(connection)
+```
+
+## Example 2: Temporal Extension Table Covariates
+
+### Scenario
+
+Sometimes you want to restrict covariates to a specific time window relative to the index date. For example, only include lab results from the 30 days before the index date.
+
+### Creating Temporal Covariate Settings
+
+```{r, eval=FALSE}
+temporalSettings <- createExtensionCovariateSettings(
+  analysisId = 997,
+  extensionDatabaseSchema = "my_extensions",
+  extensionTableName = "patient_biomarkers",
+  extensionFields = c("biomarker_id", "biomarker_value", "measurement_date"),
+  joinField = "person_id",
+  covariateIdField = "biomarker_id",
+  covariateValueField = "biomarker_value",
+  dateField = "measurement_date",
+  startDay = -30,    # 30 days before index date
+  endDay = 0,        # Up to index date
+  isBinary = FALSE,
+  missingMeansZero = FALSE
+)
+```
+
+## Example 3: Combining with Standard Covariates
+
+You can combine extension table covariates with standard FeatureExtraction covariates by creating a list of covariate settings:
+
+```{r, eval=FALSE}
+# Standard demographic covariates
+demographicsSettings <- FeatureExtraction::createCovariateSettings(
+  useDemographicsGender = TRUE,
+  useDemographicsAgeGroup = TRUE,
+  useDemographicsRace = TRUE
+)
+
+# Extension table covariates
+extensionSettings <- createExtensionCovariateSettings(
+  analysisId = 998,
+  extensionDatabaseSchema = "my_extensions",
+  extensionTableName = "patient_biomarkers",
+  joinField = "person_id",
+  covariateIdField = "biomarker_id",
+  covariateValueField = "biomarker_value"
+)
+
+# Combine into a list
+covariateSettingsList <- list(
+  demographicsSettings,
+  extensionSettings
+)
+
+# Extract all covariates together
+connection <- DatabaseConnector::connect(connectionDetails)
+
+allCovariateData <- FeatureExtraction::getDbCovariateData(
+  connection = connection,
+  cdmDatabaseSchema = "cdm",
+  cohortTable = "#cohort",
+  cohortIds = 1,
+  covariateSettings = covariateSettingsList
+)
+
+DatabaseConnector::disconnect(connection)
+```
+
+
+## Use with PatientLevelPrediction
+
+Extension table covariates can be used directly with the PatientLevelPrediction package:
+
+```{r, eval=FALSE}
+library(PatientLevelPrediction)
+
+# Create extension covariate settings
+covariateSettings <- createExtensionCovariateSettings(
+  analysisId = 998,
+  extensionDatabaseSchema = "my_extensions",
+  extensionTableName = "patient_biomarkers",
+  joinField = "person_id",
+  covariateIdField = "biomarker_id",
+  covariateValueField = "biomarker_value",
+  dateField = "measurement_date",
+  startDay = -365,
+  endDay = 0
+)
+
+# Get PLP data including extension covariates
+plpData <- getPlpData(
+  connectionDetails = connectionDetails,
+  cdmDatabaseSchema = "cdm",
+  cohortDatabaseSchema = "results",
+  cohortTable = "cohort",
+  cohortId = 1,
+  covariateSettings = covariateSettings,
+  outcomeDatabaseSchema = "results",
+  outcomeTable = "cohort",
+  outcomeIds = 2
+)
+
+# Run prediction model
+model <- runPlp(
+  plpData = plpData,
+  outcomeId = 2,
+  modelSettings = setLassoLogisticRegression()
+)
+```
+
+## Use with CohortMethod
+
+Extension covariates can also be used for comparative effectiveness studies:
+
+```{r, eval=FALSE}
+library(CohortMethod)
+
+connection <- DatabaseConnector::connect(connectionDetails)
+
+# Extract covariates for multiple cohorts
+covariateData <- FeatureExtraction::getDbCovariateData(
+  connection = connection,
+  cdmDatabaseSchema = "cdm",
+  cohortDatabaseSchema = "results",
+  cohortTable = "cohort",
+  cohortIds = c(1, 2),  # Treatment and comparator
+  covariateSettings = extensionSettings
+)
+
+# Use in propensity score matching
+ps <- createPs(
+  cohortMethodData = cohortMethodData,
+  population = population,
+  prior = createPrior("laplace", useCrossValidation = TRUE)
+)
+
+DatabaseConnector::disconnect(connection)
+```
+
+## Best Practices
+
+### 1. Choose Unique Analysis IDs
+
+Analysis IDs should be unique and not conflict with FeatureExtraction's predefined analyses. We recommend using IDs in the 900-999 range for custom extensions:
+
+```{r, eval=FALSE}
+# Good practice
+createExtensionCovariateSettings(analysisId = 998, ...)
+
+# Avoid low IDs that might conflict
+# createExtensionCovariateSettings(analysisId = 1, ...)  # Bad!
+```
+
+### 2. Document Your Extension Tables
+
+Maintain clear documentation of:
+
+- Extension table schema
+- Covariate ID meanings
+- Data provenance
+- Update frequency
+
+### 3. Handle Missing Values
+
+Consider how missing values should be interpreted:
+
+```{r, eval=FALSE}
+# Missing means zero (e.g., for binary indicators)
+createExtensionCovariateSettings(
+  missingMeansZero = TRUE,
+  ...
+)
+
+# Missing means missing (e.g., for lab values)
+createExtensionCovariateSettings(
+  missingMeansZero = FALSE,
+  ...
+)
+```
+
+### 4. Use Temporal Windows Appropriately
+
+Choose temporal windows that make clinical sense:
+
+```{r, eval=FALSE}
+# Recent labs (30 days)
+createExtensionCovariateSettings(
+  startDay = -30,
+  endDay = 0,
+  ...
+)
+
+# Historical data (1 year)
+createExtensionCovariateSettings(
+  startDay = -365,
+  endDay = -1,
+  ...
+)
+```
+
+## Advanced Topics
+
+### Custom SQL Queries
+
+For complex queries, you can use the SQL templates provided in the package:
+
+```{r, eval=FALSE}
+sqlFile <- system.file(
+  "sql/sql_server/GetExtensionCovariates.sql",
+  package = "FeatureExtractionForExtensions"
+)
+sql <- readChar(sqlFile, file.info(sqlFile)$size)
+```
+
+### Performance Optimization
+
+For large extension tables:
+
+1. Create appropriate indexes on join and filter columns
+2. Consider pre-aggregating data when possible
+3. Use temporal filtering to reduce data volume
+4. Test queries on a sample before full extraction
+
+```sql
+-- Example indexes
+CREATE INDEX idx_ext_person_date
+  ON my_extensions.patient_biomarkers(person_id, measurement_date);
+
+CREATE INDEX idx_ext_biomarker
+  ON my_extensions.patient_biomarkers(biomarker_id);
+```
+
+## Troubleshooting
+
+### Common Issues
+
+**Issue**: "Cannot find extension table"
+
+- Check that `extensionDatabaseSchema` and `extensionTableName` are correct
+- Verify database user has SELECT permissions on the extension table
+
+**Issue**: "No covariates extracted"
+
+- Verify that the extension table has data for the cohort
+- Check that temporal windows include available dates
+- Ensure `joinField` matches the cohort's subject_id
+
+**Issue**: "Covariate names are missing"
+
+- Provide `covariateRefTable` and `covariateNameField` parameters
+- Or, covariates will be named by their IDs
+
+## Conclusion
+
+The FeatureExtractionForExtensions package provides a flexible framework for incorporating custom extension table data into OHDSI analytics workflows. By following the patterns demonstrated in this vignette, you can seamlessly integrate domain-specific data with standard OMOP CDM features.
+
+## Additional Resources
+
+- [FeatureExtraction Package](https://ohdsi.github.io/FeatureExtraction/)
+- [OHDSI Book - Chapter on Feature Extraction](https://ohdsi.github.io/TheBookOfOhdsi/)
+- [OHDSI Forums](https://forums.ohdsi.org/)
