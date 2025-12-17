@@ -184,38 +184,6 @@ covariateSettings <- createExtensionCovariateSettings(
 )
 ```
 
-### 2. Social Determinants of Health
-
-Include social and behavioral data:
-
-```r
-covariateSettings <- createExtensionCovariateSettings(
-  analysisId = 951,
-  extensionDatabaseSchema = "sdoh_extensions",
-  extensionTableName = "patient_sdoh",
-  joinField = "person_id",
-  covariateIdField = "sdoh_code",
-  covariateValueField = "sdoh_value",
-  isBinary = TRUE
-)
-```
-
-### 3. Genomic Data
-
-Incorporate genetic markers:
-
-```r
-covariateSettings <- createExtensionCovariateSettings(
-  analysisId = 952,
-  extensionDatabaseSchema = "genomic_extensions",
-  extensionTableName = "patient_variants",
-  joinField = "person_id",
-  covariateIdField = "variant_id",
-  covariateValueField = "variant_present",
-  isBinary = TRUE
-)
-```
-
 ## Integration with OHDSI Tools
 
 ### PatientLevelPrediction
