@@ -4,9 +4,9 @@ Title: Building Covariates from Extension Tables
 Version: 0.1.0
 Date: 2025-12-16
 Authors@R: c(
-  person("Jared", "Houghtaling", , "houghtaling@ohdsi.org", role = c("aut")),
-  person("Martijn", "Scheumie", , "scheumie@ohdsi.org", role = c("aut"))
-  )
+    person("Jared", "Houghtaling", email = "houghtaling@ohdsi.org", role = c("aut", "cre")),
+    person("Martijn", "Scheumie", email = "scheumie@ohdsi.org", role = c("aut"))
+    )
 Maintainer: Jared Houghtaling <houghtaling@ohdsi.org>
 Description: An R package for creating covariate objects for analytics pipelines
     that reference extension tables in OMOP CDM databases. This package extends the
