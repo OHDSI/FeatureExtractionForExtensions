@@ -29,7 +29,7 @@
 #' \itemize{
 #'   \item \code{\link{createExtensionCovariateSettings}}: Create settings for
 #'         extension table covariates
-#'   \item \code{\link{getDbExtensionCovariateData}}: Extract covariates from
+#'   \item \code{\link{getDbExtCovariateData}}: Extract covariates from
 #'         extension tables
 #' }
 #'
@@ -37,7 +37,7 @@
 #' \enumerate{
 #'   \item Create a connection to your database using DatabaseConnector
 #'   \item Define your covariate settings using \code{createExtensionCovariateSettings}
-#'   \item Extract covariates using \code{getDbExtensionCovariateData}
+#'   \item Extract covariates using \code{getDbExtCovariateData}
 #'   \item Use the resulting CovariateData object with other OHDSI tools
 #' }
 #'
@@ -74,7 +74,7 @@
 #' )
 #'
 #' # Extract covariates
-#' covariateData <- getDbExtensionCovariateData(
+#' covariateData <- getDbExtCovariateData(
 #'   connection = connection,
 #'   cdmDatabaseSchema = "cdm",
 #'   cohortTable = "#cohort",
