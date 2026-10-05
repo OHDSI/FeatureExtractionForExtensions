@@ -65,7 +65,7 @@ temporalBiomarkerSettings <- createExtensionCovariateSettings(
 # ============================================================================
 
 # Extract covariates from extension table only
-extensionCovariateData <- getDbExtensionCovariateData(
+extensionCovariateData <- getDbExtCovariateData(
   connection = connection,
   cdmDatabaseSchema = "cdm_schema",
   cohortTable = "#cohort_table",

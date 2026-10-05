@@ -43,7 +43,10 @@
 #' @param covariateSettings An object of type \code{covariateSettings} as created
 #'   using the \code{\link{createExtensionCovariateSettings}} function.
 #' @param aggregated Should covariates be constructed per-person, or aggregated
-#'   across the cohort?
+#'   across the cohort? Aggregated covariates have the same format as FeatureExtraction's
+#'   (binary analyses: sum and average over the cohort population; other analyses: count, min,
+#'   max, mean, standard deviation and percentiles). See \code{aggregateOnServer} in
+#'   \code{\link{createExtensionCovariateSettings}}.
 #' @param minCharacterizationMean The minimum mean value for characterization output.
 #'   Values below this will be cut off from output. This will help reduce the file
 #'   size of the characterization output, but will remove information on covariates
@@ -127,10 +130,6 @@ getDbExtCovariateData <- function(connection,
     stop("Common Data Model version 4 is not supported")
   }
 
-  if (aggregated) {
-    stop("Aggregation not currently supported for extension table covariates")
-  }
-
   start <- Sys.time()
   writeLines("Constructing covariates from extension tables")
 
@@ -160,12 +159,26 @@ getDbExtCovariateData <- function(connection,
 
   writeLines(paste("Population size:", populationSize))
 
+  # When a concept set is given, only rows for its concepts are extracted (the covariate id field
+  # is assumed to hold concept ids), and the same ids are used for the covariate reference
+  conceptIds <- NULL
+  if (!is.null(covariateSettings$conceptSet) && is.null(covariateSettings$covariateRefTable)) {
+    conceptIds <- extractConceptIdsFromConceptSet(
+      covariateSettings$conceptSet,
+      connection = connection,
+      cdmDatabaseSchema = cdmDatabaseSchema,
+      tempEmulationSchema = tempEmulationSchema
+    )
+  }
+
   # Build the SQL query to extract covariates from extension table
   sql <- buildExtensionCovariateQuery(
     cohortTable = cohortTable,
     rowIdField = rowIdField,
     cohortIds = cohortIds,
-    covariateSettings = covariateSettings
+    covariateSettings = covariateSettings,
+    conceptIds = conceptIds,
+    aggregated = aggregated
   )
 
   # Render and translate SQL
@@ -173,6 +186,7 @@ getDbExtCovariateData <- function(connection,
     cohort_table = cohortTable,
     row_id_field = rowIdField,
     cohort_ids = cohortIds,
+    analysis_id = covariateSettings$analysisId,
     extension_database_schema = covariateSettings$extensionDatabaseSchema,
     extension_table = covariateSettings$extensionTableName,
     join_field = covariateSettings$joinField,
@@ -186,12 +200,42 @@ getDbExtCovariateData <- function(connection,
     renderParams$parent_join_field <- covariateSettings$parentJoinField
   }
 
-  sql <- do.call(SqlRender::render, c(list(sql = sql), renderParams))
+  sqlRendered <- do.call(SqlRender::render, c(list(sql = sql, warnOnMissingParameters = FALSE), renderParams))
 
-  sql <- SqlRender::translate(sql,
+  sql <- SqlRender::translate(sqlRendered,
     targetDialect = attr(connection, "dbms"),
     tempEmulationSchema = tempEmulationSchema
   )
+
+  # Aggregated covariates: compute the statistics in the database
+  if (aggregated && !identical(covariateSettings$aggregateOnServer, FALSE)) {
+    covariateRef <- buildCovariateReference(
+      connection = connection,
+      cdmDatabaseSchema = cdmDatabaseSchema,
+      tempEmulationSchema = tempEmulationSchema,
+      covariateSettings = covariateSettings,
+      conceptIds = conceptIds
+    )
+    result <- aggregateExtensionCovariatesOnServer(
+      connection = connection,
+      rowsSql = sqlRendered,
+      tempEmulationSchema = tempEmulationSchema,
+      covariateRef = covariateRef,
+      analysisRef = buildAnalysisReference(covariateSettings),
+      populationSize = populationSize,
+      minCharacterizationMean = minCharacterizationMean
+    )
+    attr(result, "metaData") <- list(
+      sql = sql,
+      call = match.call(),
+      extensionTable = covariateSettings$extensionTableName,
+      populationSize = populationSize,
+      cohortIds = as.numeric(names(populationSize))
+    )
+    delta <- Sys.time() - start
+    writeLines(paste("Loading took", signif(delta, 3), attr(delta, "units")))
+    return(result)
+  }
 
   # Debug: Optionally save SQL for inspection
   if (getOption("FeatureExtractionForExtensions.saveSql", FALSE)) {
@@ -206,7 +250,9 @@ getDbExtCovariateData <- function(connection,
   # Debug: Report covariate extraction results
   writeLines(paste("Extension covariate query returned", nrow(covariates), "rows"))
   if (nrow(covariates) > 0) {
-    writeLines(paste("  Unique rowIds:", length(unique(covariates$rowId))))
+    if ("rowId" %in% names(covariates)) {
+      writeLines(paste("  Unique rowIds:", length(unique(covariates$rowId))))
+    }
     writeLines(paste("  Unique covariateIds:", paste(unique(covariates$covariateId), collapse=", ")))
   } else {
     writeLines("  WARNING: No covariate data extracted from extension table!")
@@ -216,50 +262,73 @@ getDbExtCovariateData <- function(connection,
     writeLines("    3. Join conditions are correct")
   }
 
-  # Ensure covariates data frame has the required structure for FeatureExtraction
-  # Standard FeatureExtraction expects: rowId, covariateId, covariateValue
-  # Verify column names match expected structure
-  if (!all(c("rowId", "covariateId", "covariateValue") %in% names(covariates))) {
-    stop("Extension covariate query must return columns: rowId, covariateId, covariateValue")
-  }
-
-  # The Andromeda schema created by createEmptyCovariateData() may include additional columns
-  # that standard FeatureExtraction uses. We need to provide ALL expected columns.
-  if (nrow(covariates) > 0) {
-    covariates$rowId <- as.integer(covariates$rowId)
+  if (aggregated) {
+    # One row per cohort row (cohort, subject, start date) and covariate; aggregated below
+    expectedColumns <- c("cohortDefinitionId", "subjectId", "cohortStartDate", "covariateId", "covariateValue")
+    if (!all(expectedColumns %in% names(covariates))) {
+      stop("Aggregated extension covariate query must return columns: ", paste(expectedColumns, collapse = ", "))
+    }
+    covariates <- covariates[, expectedColumns]
     covariates$covariateId <- as.numeric(covariates$covariateId)
     covariates$covariateValue <- as.numeric(covariates$covariateValue)
   } else {
-    # Create empty data frame with all required columns
-    covariates <- data.frame(
-      rowId = integer(0),
-      covariateId = numeric(0),
-      covariateValue = numeric(0)
-    )
-  }
+    # Ensure covariates data frame has the required structure for FeatureExtraction
+    # Standard FeatureExtraction expects: rowId, covariateId, covariateValue
+    # Verify column names match expected structure
+    if (!all(c("rowId", "covariateId", "covariateValue") %in% names(covariates))) {
+      stop("Extension covariate query must return columns: rowId, covariateId, covariateValue")
+    }
 
-  # Select columns in the correct order for Andromeda compatibility
-  covariates <- covariates[, c("rowId", "covariateId", "covariateValue")]
+    # The Andromeda schema created by createEmptyCovariateData() may include additional columns
+    # that standard FeatureExtraction uses. We need to provide ALL expected columns.
+    if (nrow(covariates) > 0) {
+      covariates$rowId <- as.integer(covariates$rowId)
+      covariates$covariateId <- as.numeric(covariates$covariateId)
+      covariates$covariateValue <- as.numeric(covariates$covariateValue)
+    } else {
+      # Create empty data frame with all required columns
+      covariates <- data.frame(
+        rowId = integer(0),
+        covariateId = numeric(0),
+        covariateValue = numeric(0)
+      )
+    }
+
+    # Select columns in the correct order for Andromeda compatibility
+    covariates <- covariates[, c("rowId", "covariateId", "covariateValue")]
+  }
 
   # Build covariate reference table
   covariateRef <- buildCovariateReference(
     connection = connection,
     cdmDatabaseSchema = cdmDatabaseSchema,
     tempEmulationSchema = tempEmulationSchema,
-    covariateSettings = covariateSettings
+    covariateSettings = covariateSettings,
+    conceptIds = conceptIds
   )
 
   # Build analysis reference
-  analysisRef <- data.frame(
-    analysisId = as.integer(covariateSettings$analysisId),
-    analysisName = as.character(paste("Extension table:", covariateSettings$extensionTableName)),
-    domainId = as.character(""),
-    startDay = as.integer(ifelse(is.null(covariateSettings$startDay), NA, covariateSettings$startDay)),
-    endDay = as.integer(ifelse(is.null(covariateSettings$endDay), NA, covariateSettings$endDay)),
-    isBinary = as.character(ifelse(covariateSettings$isBinary, "Y", "N")),
-    missingMeansZero = as.character(ifelse(covariateSettings$missingMeansZero, "Y", "N")),
-    stringsAsFactors = FALSE
-  )
+  analysisRef <- buildAnalysisReference(covariateSettings)
+
+  if (aggregated) {
+    result <- aggregateExtensionCovariates(
+      covariates = covariates,
+      covariateRef = covariateRef,
+      analysisRef = analysisRef,
+      populationSize = populationSize,
+      minCharacterizationMean = minCharacterizationMean
+    )
+    attr(result, "metaData") <- list(
+      sql = sql,
+      call = match.call(),
+      extensionTable = covariateSettings$extensionTableName,
+      populationSize = populationSize,
+      cohortIds = as.numeric(names(populationSize))
+    )
+    delta <- Sys.time() - start
+    writeLines(paste("Loading took", signif(delta, 3), attr(delta, "units")))
+    return(result)
+  }
 
   # Create metadata with population size (required for PLP)
   metaData <- list(
@@ -334,8 +403,20 @@ getDbExtCovariateData <- function(connection,
 #'   containing the concept IDs to use as covariates. This is used to build the
 #'   covariateRef table with the correct concept IDs. If the concept sets use
 #'   descendants(), the function will query the vocabulary to expand them.
-#' @param isBinary Are these binary covariates (values should only be 0 or 1)?
-#' @param missingMeansZero Should missing values be interpreted as 0?
+#' @param isBinary If TRUE, the covariate value is 1 whenever the person has at least one matching
+#'   row in the window (the value field is ignored).
+#' @param missingMeansZero Kept for compatibility and recorded in the analysis reference.
+#'   FeatureExtraction treats a covariate that is absent for a person as zero, so rows are only
+#'   returned where the extension table has data; this argument does not change the query.
+#' @param valueAggregation How to combine several rows of the same covariate for a person within
+#'   the window: "max" (default), "min", "mean", "sum" or "count" (number of non-missing values).
+#' @param aggregateOnServer Only used when extracting aggregated covariates (\code{aggregated = TRUE}). If TRUE
+#'   (default) the statistics are computed in the database and only summaries are downloaded; if FALSE all
+#'   person-level rows are downloaded and aggregated in R with \code{FeatureExtraction::aggregateCovariates}.
+#'   Both give the same result.
+#' @param endDateField (Optional) The end date field of the extension table. When given together
+#'   with startDay/endDay, a row is included if its interval [dateField, endDateField] overlaps the
+#'   window (instead of requiring its start date to fall inside the window).
 #' @param warnOnAnalysisIdOverlap Warn if the provided analysisId overlaps with
 #'   any predefined analysis from FeatureExtraction.
 #'
@@ -418,6 +499,9 @@ createExtensionCovariateSettings <- function(analysisId,
                                               conceptSet = NULL,
                                               isBinary = FALSE,
                                               missingMeansZero = FALSE,
+                                              valueAggregation = "max",
+                                              endDateField = NULL,
+                                              aggregateOnServer = TRUE,
                                               warnOnAnalysisIdOverlap = TRUE) {
 
   # Input validation
@@ -444,6 +528,9 @@ createExtensionCovariateSettings <- function(analysisId,
   )
   checkmate::assertLogical(isBinary, len = 1, add = errorMessages)
   checkmate::assertLogical(missingMeansZero, len = 1, add = errorMessages)
+  checkmate::assertChoice(valueAggregation, c("max", "min", "mean", "sum", "count"), add = errorMessages)
+  checkmate::assertCharacter(endDateField, len = 1, null.ok = TRUE, add = errorMessages)
+  checkmate::assertLogical(aggregateOnServer, len = 1, add = errorMessages)
   checkmate::assertLogical(warnOnAnalysisIdOverlap, len = 1, add = errorMessages)
   checkmate::reportAssertions(collection = errorMessages)
 
@@ -453,6 +540,10 @@ createExtensionCovariateSettings <- function(analysisId,
   }
   if (!is.null(parentJoinField) && is.null(parentTable)) {
     stop("parentTable must be specified when using parentJoinField")
+  }
+
+  if (!is.null(endDateField) && is.null(dateField)) {
+    stop("dateField must be specified when using endDateField")
   }
 
   # Check that temporal parameters are consistent
@@ -501,15 +592,38 @@ createExtensionCovariateSettings <- function(analysisId,
 buildExtensionCovariateQuery <- function(cohortTable,
                                          rowIdField,
                                          cohortIds,
-                                         covariateSettings) {
+                                         covariateSettings,
+                                         conceptIds = NULL,
+                                         aggregated = FALSE) {
 
   # Start building the SELECT clause
   # Note: Always use table aliases - 'c' for cohort, 'ext' for extension table
+  # Covariate id follows the FeatureExtraction convention: id * 1000 + analysis id, so that the same
+  # concept extracted by different analyses (for example different windows) does not collide
+  aggregation <- covariateSettings$valueAggregation
+  if (is.null(aggregation)) aggregation <- "max"
+  valueExpression <- if (isTRUE(covariateSettings$isBinary)) {
+    "1"
+  } else {
+    switch(aggregation,
+      max = "MAX(ext.@covariate_value_field)",
+      min = "MIN(ext.@covariate_value_field)",
+      mean = "AVG(ext.@covariate_value_field)",
+      sum = "SUM(ext.@covariate_value_field)",
+      count = "COUNT(ext.@covariate_value_field)"
+    )
+  }
+  # Aggregated: one row per cohort row (cohort id, subject, start date) so that every cohort row counts once
+  rowColumns <- if (aggregated) {
+    "c.cohort_definition_id AS cohort_definition_id, c.subject_id AS subject_id, c.cohort_start_date AS cohort_start_date,"
+  } else {
+    "c.@row_id_field AS row_id,"
+  }
   selectClause <- paste(
     "SELECT",
-    "c.@row_id_field AS row_id,",
-    "ext.@covariate_id_field AS covariate_id,",
-    "MAX(ext.@covariate_value_field) AS covariate_value"
+    rowColumns,
+    "CAST(ext.@covariate_id_field AS BIGINT) * 1000 + @analysis_id AS covariate_id,",
+    paste0(valueExpression, " AS covariate_value")
   )
 
   # Build FROM clause with optional parent table join
@@ -550,20 +664,44 @@ buildExtensionCovariateQuery <- function(cohortTable,
       "ext"     # Date field in extension table
     }
 
+    if (!is.null(covariateSettings$endDateField)) {
+      # Overlap of [dateField, endDateField] with the window (a missing end date counts as the start date)
+      whereConditions <- c(
+        whereConditions,
+        sprintf(
+          "%s.%s <= DATEADD(day, %d, c.cohort_start_date)",
+          dateTableAlias, covariateSettings$dateField, covariateSettings$endDay
+        ),
+        sprintf(
+          "COALESCE(%s.%s, %s.%s) >= DATEADD(day, %d, c.cohort_start_date)",
+          dateTableAlias, covariateSettings$endDateField, dateTableAlias, covariateSettings$dateField,
+          covariateSettings$startDay
+        )
+      )
+    } else {
+      whereConditions <- c(
+        whereConditions,
+        sprintf(
+          "%s.%s >= DATEADD(day, %d, c.cohort_start_date)",
+          dateTableAlias,
+          covariateSettings$dateField,
+          covariateSettings$startDay
+        ),
+        sprintf(
+          "%s.%s <= DATEADD(day, %d, c.cohort_start_date)",
+          dateTableAlias,
+          covariateSettings$dateField,
+          covariateSettings$endDay
+        )
+      )
+    }
+  }
+
+  # Restrict to the requested concepts
+  if (!is.null(conceptIds) && length(conceptIds) > 0) {
     whereConditions <- c(
       whereConditions,
-      sprintf(
-        "%s.%s >= DATEADD(day, %d, c.cohort_start_date)",
-        dateTableAlias,
-        covariateSettings$dateField,
-        covariateSettings$startDay
-      ),
-      sprintf(
-        "%s.%s <= DATEADD(day, %d, c.cohort_start_date)",
-        dateTableAlias,
-        covariateSettings$dateField,
-        covariateSettings$endDay
-      )
+      paste0("ext.@covariate_id_field IN (", paste(format(conceptIds, scientific = FALSE, trim = TRUE), collapse = ", "), ")")
     )
   }
 
@@ -574,11 +712,12 @@ buildExtensionCovariateQuery <- function(cohortTable,
     whereClause <- ""
   }
 
-  # Group Clause (consolidate to max)
-  groupClause <- paste(
-      "GROUP BY c.@row_id_field,",
-      "ext.@covariate_id_field"
-    )
+  # Group Clause (one value per person and covariate)
+  groupClause <- if (aggregated) {
+    "GROUP BY c.cohort_definition_id, c.subject_id, c.cohort_start_date, ext.@covariate_id_field"
+  } else {
+    paste("GROUP BY c.@row_id_field,", "ext.@covariate_id_field")
+  }
   # Combine all parts
   sql <- paste(selectClause, fromClause, whereClause, groupClause)
 
@@ -589,7 +728,8 @@ buildExtensionCovariateQuery <- function(cohortTable,
 buildCovariateReference <- function(connection,
                                     cdmDatabaseSchema,
                                     tempEmulationSchema,
-                                    covariateSettings) {
+                                    covariateSettings,
+                                    conceptIds = NULL) {
 
   # If a reference table is specified, query it
   if (!is.null(covariateSettings$covariateRefTable) &&
@@ -597,7 +737,7 @@ buildCovariateReference <- function(connection,
 
     refSql <- paste(
       "SELECT",
-      paste0(covariateSettings$covariateIdField, " AS covariate_id,"),
+      paste0("CAST(", covariateSettings$covariateIdField, " AS BIGINT) * 1000 + ", covariateSettings$analysisId, " AS covariate_id,"),
       paste0(covariateSettings$covariateNameField, " AS covariate_name,"),
       paste0(covariateSettings$analysisId, " AS analysis_id,"),
       paste0(covariateSettings$covariateIdField, " AS concept_id,"),
@@ -616,12 +756,14 @@ buildCovariateReference <- function(connection,
   } else if (!is.null(covariateSettings$conceptSet)) {
     # Extract concept IDs from the provided concept set(s)
     # This will expand descendants if needed by querying the vocabulary
-    conceptIds <- extractConceptIdsFromConceptSet(
-      covariateSettings$conceptSet,
-      connection = connection,
-      cdmDatabaseSchema = cdmDatabaseSchema,
-      tempEmulationSchema = tempEmulationSchema
-    )
+    if (is.null(conceptIds)) {
+      conceptIds <- extractConceptIdsFromConceptSet(
+        covariateSettings$conceptSet,
+        connection = connection,
+        cdmDatabaseSchema = cdmDatabaseSchema,
+        tempEmulationSchema = tempEmulationSchema
+      )
+    }
 
     if (length(conceptIds) > 0) {
       # Try to get concept names from the vocabulary
@@ -653,7 +795,7 @@ buildCovariateReference <- function(connection,
       # Build reference with names if available
       if (!is.null(conceptNames)) {
         covariateRef <- data.frame(
-          covariateId = as.numeric(conceptIds),
+          covariateId = as.numeric(conceptIds) * 1000 + covariateSettings$analysisId,
           covariateName = sapply(conceptIds, function(id) {
             name <- conceptNames[as.character(id)]
             if (is.null(name) || is.na(name)) {
@@ -671,7 +813,7 @@ buildCovariateReference <- function(connection,
       } else {
         # Fallback without names
         covariateRef <- data.frame(
-          covariateId = as.numeric(conceptIds),
+          covariateId = as.numeric(conceptIds) * 1000 + covariateSettings$analysisId,
           covariateName = paste(
             covariateSettings$extensionTableName,
             "concept:",
@@ -892,18 +1034,45 @@ extractConceptIdsFromConceptSet <- function(conceptSet,
 
 
 createEmptyExtCovariateData <- function(cohortIds, aggregated, temporal) {
-  dummy <- tibble(
-    covariateId = 1,
-    covariateValue = 1
-  )
-  if (!aggregated) {
+  if (aggregated) {
+    # Same tables as FeatureExtraction's aggregated CovariateData
+    covariates <- tibble(
+      cohortDefinitionId = 1,
+      covariateId = 1,
+      sumValue = 1,
+      averageValue = 1
+    )[!1, ]
+    covariatesContinuous <- tibble(
+      cohortDefinitionId = 1,
+      covariateId = 1,
+      countValue = 1,
+      minValue = 1,
+      maxValue = 1,
+      averageValue = 1,
+      standardDeviation = 1,
+      medianValue = 1,
+      p10Value = 1,
+      p25Value = 1,
+      p75Value = 1,
+      p90Value = 1
+    )[!1, ]
+  } else {
+    dummy <- tibble(
+      covariateId = 1,
+      covariateValue = 1
+    )
     dummy$rowId <- 1
+    if (!is.null(temporal) && temporal) {
+      dummy$timeId <- 1
+    }
+    covariates <- dummy[!1, ]
+    covariatesContinuous <- NULL
   }
-  if (!is.null(temporal) && temporal) {
-    dummy$timeId <- 1
+  tables <- list(covariates = covariates)
+  if (!is.null(covariatesContinuous)) {
+    tables$covariatesContinuous <- covariatesContinuous
   }
-  covariateData <- Andromeda::andromeda(
-    covariates = dummy[!1, ],
+  covariateData <- do.call(Andromeda::andromeda, c(tables, list(
     covariateRef = tibble(
       covariateId = 1,
       covariateName = "",
@@ -921,7 +1090,7 @@ createEmptyExtCovariateData <- function(cohortIds, aggregated, temporal) {
       isBinary = "",
       missingMeansZero = ""
     )[!1, ]
-  )
+  )))
   attr(covariateData, "metaData") <- list(
     populationSize = 0,
     cohortIds = cohortIds
@@ -930,3 +1099,88 @@ createEmptyExtCovariateData <- function(cohortIds, aggregated, temporal) {
   return(covariateData)
 }
 
+# Aggregate person-level extension covariates into FeatureExtraction's aggregated format. The covariates data
+# frame has one row per cohort row (cohortDefinitionId, subjectId, cohortStartDate) and covariate. Each cohort is
+# turned into a person-level CovariateData and aggregated with FeatureExtraction::aggregateCovariates, so binary
+# covariates (analysisRef isBinary = "Y") end up in covariates (sum, average over the population) and the others in
+# covariatesContinuous (count, min, max, mean, sd and percentiles). populationSize is a named vector by cohort id.
+aggregateExtensionCovariates <- function(covariates,
+                                         covariateRef,
+                                         analysisRef,
+                                         populationSize,
+                                         minCharacterizationMean = 0) {
+  cohortIds <- as.numeric(names(populationSize))
+  result <- createEmptyExtCovariateData(cohortIds = cohortIds, aggregated = TRUE, temporal = FALSE)
+
+  binaryList <- list()
+  continuousList <- list()
+  for (cohortId in cohortIds) {
+    cohortCovariates <- covariates[covariates$cohortDefinitionId == cohortId, , drop = FALSE]
+    if (nrow(cohortCovariates) == 0) {
+      next
+    }
+    key <- paste(cohortCovariates$subjectId, cohortCovariates$cohortStartDate)
+    cohortCovariates$rowId <- match(key, unique(key))
+
+    personData <- createEmptyExtCovariateData(cohortIds = cohortId, aggregated = FALSE, temporal = FALSE)
+    Andromeda::appendToTable(personData$covariates, cohortCovariates[, c("rowId", "covariateId", "covariateValue")])
+    if (nrow(covariateRef) > 0) {
+      Andromeda::appendToTable(personData$covariateRef, covariateRef)
+    }
+    Andromeda::appendToTable(personData$analysisRef, analysisRef)
+    attr(personData, "metaData") <- list(
+      populationSize = unname(populationSize[as.character(cohortId)]),
+      cohortIds = cohortId
+    )
+    aggregatedData <- FeatureExtraction::aggregateCovariates(personData)
+
+    # aggregateCovariates only creates a table when the analyses need it
+    binary <- if (is.null(aggregatedData$covariates)) data.frame() else dplyr::collect(aggregatedData$covariates)
+    if (nrow(binary) > 0) {
+      binary$cohortDefinitionId <- cohortId
+      binaryList[[length(binaryList) + 1]] <- binary
+    }
+    continuous <- if (is.null(aggregatedData$covariatesContinuous)) data.frame() else dplyr::collect(aggregatedData$covariatesContinuous)
+    if (nrow(continuous) > 0) {
+      continuous$cohortDefinitionId <- cohortId
+      continuousList[[length(continuousList) + 1]] <- continuous
+    }
+    Andromeda::close(personData)
+    Andromeda::close(aggregatedData)
+  }
+
+  if (length(binaryList) > 0) {
+    binary <- dplyr::bind_rows(binaryList)
+    binary <- binary[binary$averageValue >= minCharacterizationMean, , drop = FALSE]
+    binary <- binary[, c("cohortDefinitionId", "covariateId", "sumValue", "averageValue")]
+    if (nrow(binary) > 0) {
+      Andromeda::appendToTable(result$covariates, binary)
+    }
+  }
+  if (length(continuousList) > 0) {
+    continuous <- dplyr::bind_rows(continuousList)
+    continuous <- continuous[, c("cohortDefinitionId", "covariateId", "countValue", "minValue", "maxValue",
+                                 "averageValue", "standardDeviation", "medianValue", "p10Value", "p25Value",
+                                 "p75Value", "p90Value")]
+    Andromeda::appendToTable(result$covariatesContinuous, continuous)
+  }
+  if (nrow(covariateRef) > 0) {
+    Andromeda::appendToTable(result$covariateRef, covariateRef)
+  }
+  Andromeda::appendToTable(result$analysisRef, analysisRef)
+  return(result)
+}
+
+# Analysis reference (one row: this extension analysis)
+buildAnalysisReference <- function(covariateSettings) {
+  data.frame(
+    analysisId = as.integer(covariateSettings$analysisId),
+    analysisName = as.character(paste("Extension table:", covariateSettings$extensionTableName)),
+    domainId = as.character(""),
+    startDay = as.integer(ifelse(is.null(covariateSettings$startDay), NA, covariateSettings$startDay)),
+    endDay = as.integer(ifelse(is.null(covariateSettings$endDay), NA, covariateSettings$endDay)),
+    isBinary = as.character(ifelse(covariateSettings$isBinary, "Y", "N")),
+    missingMeansZero = as.character(ifelse(covariateSettings$missingMeansZero, "Y", "N")),
+    stringsAsFactors = FALSE
+  )
+}

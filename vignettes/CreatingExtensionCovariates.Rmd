@@ -40,7 +40,7 @@ To create custom covariate builders, two things are needed:
 The FeatureExtractionForExtensions package provides these functions:
 
 - `createExtensionCovariateSettings()` - The settings function
-- `getDbExtensionCovariateData()` - The construction function
+- `getDbExtCovariateData()` - The construction function
 
 ## Example 1: Basic Extension Table Covariates
 
@@ -95,7 +95,7 @@ biomarkerSettings <- createExtensionCovariateSettings(
 connection <- DatabaseConnector::connect(connectionDetails)
 
 # Extract covariates for a specific cohort
-covariateData <- getDbExtensionCovariateData(
+covariateData <- getDbExtCovariateData(
   connection = connection,
   cdmDatabaseSchema = "cdm",
   cohortTable = "#cohort",

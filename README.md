@@ -61,7 +61,7 @@ covariateSettings <- createExtensionCovariateSettings(
 )
 
 # Extract covariates
-covariateData <- getDbExtensionCovariateData(
+covariateData <- getDbExtCovariateData(
   connection = connection,
   cdmDatabaseSchema = "cdm",
   cohortTable = "#cohort",
@@ -130,6 +130,15 @@ covariateData <- getDbCovariateData(
   covariateSettings = covariateSettingsList
 )
 ```
+
+### Options
+
+- `conceptSet`: when given (and no `covariateRefTable`), only rows whose `covariateIdField` is one of the concept set's concepts are extracted, and the same concepts label the covariate reference.
+- `valueAggregation`: how several rows of the same covariate within the window are combined for a person: `"max"` (default), `"min"`, `"mean"`, `"sum"` or `"count"`. The mean is an unweighted mean of the rows.
+- `endDateField`: with `startDay`/`endDay`, include rows whose interval `[dateField, endDateField]` overlaps the window (rows are used whole, not clipped). Without it a row's `dateField` must fall inside the window.
+- `isBinary`: the covariate value is 1 whenever the person has a matching row.
+- Covariate IDs are `covariateIdField * 1000 + analysisId`, following FeatureExtraction, so the same concept extracted by different analyses does not collide.
+- `aggregated = TRUE` returns FeatureExtraction's aggregated `CovariateData` (`covariates` with sum and average per cohort for binary analyses, `covariatesContinuous` with count, min, max, mean, SD and percentiles otherwise, and a named `populationSize`), so `computeStandardizedDifference()` and similar functions work. By default the statistics are computed in the database and only summaries are downloaded; `aggregateOnServer = FALSE` downloads the person-level rows and aggregates in R. Both give the same result (percentiles are the type 1 quantiles FeatureExtraction uses, and `missingMeansZero = TRUE` counts persons without a row as zeros, exactly as `aggregateCovariates()` does). Tested on PostgreSQL; the SQL is translated with SqlRender. Temporal covariates are not supported.
 
 ## Extension Table Structure
 

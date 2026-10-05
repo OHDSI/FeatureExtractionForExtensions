@@ -1,3 +1,5 @@
+-- Reference template only: the package builds this query in R (buildExtensionCovariateQuery) so that
+-- valueAggregation, endDateField and concept set filters can be applied.
 -- Generic SQL template for extracting covariates from extension tables
 -- This template can be customized for different extension table structures or formats
 
